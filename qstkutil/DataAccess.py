@@ -50,6 +50,7 @@ class DataSource(object):
     COMPUSTAT="Compustat"
     CUSTOM="Custom"    
     MLT = "ML4Trading"
+    FINAM = "Finam"
     #class DataSource ends
 
 class DataAccess(object):
@@ -108,6 +109,11 @@ class DataAccess(object):
             self.source = DataSource.CUSTOM
             self.folderList.append(self.rootdir+"/Processed/Custom/")	
         
+        elif (sourcein == DataSource.FINAM) :
+            self.source = DataSource.FINAM
+            self.folderList.append(self.rootdir+"/Finam/")   
+            self.fileExtensionToRemove=".csv"
+
         elif (sourcein == DataSource.MLT) :
             self.source = DataSource.MLT
             self.folderList.append(self.rootdir+"/ML4Trading/")   
@@ -230,6 +236,23 @@ class DataAccess(object):
                 else:
                     #incorrect value
                     raise ValueError ("Incorrect value for data_item %s"%sItem)
+
+            if( self.source == DataSource.FINAM ):
+                if (sItem == DataItem.OPEN):
+                    list_index.append(2)
+                elif (sItem == DataItem.HIGH):
+                    list_index.append(3)
+                elif (sItem ==DataItem.LOW):
+                    list_index.append(4)
+                elif (sItem == DataItem.CLOSE):
+                    list_index.append(5)
+                elif(sItem == DataItem.VOL):
+                    list_index.append(6)
+                elif (sItem == DataItem.ACTUAL_CLOSE):
+                    list_index.append(5)
+                else:
+                    #incorrect value
+                    raise ValueError ("Incorrect value for data_item %s"%sItem)
                 #end elif
         #end data_item loop
 
@@ -298,6 +321,43 @@ class DataAccess(object):
                             else: 
                                 row[i]=float(item)
                         naData=np.vstack([np.array(row),naData])
+                elif (self.source == DataSource.FINAM):
+                    creader = csv.reader(_file)
+                    row=creader.next()
+                    row=creader.next()
+                    #row.pop(0)
+                    for i, item in enumerate(row):
+                        if i==0:
+                            try:
+                                date = dt.datetime.strptime(item, '%Y-%m-%d')
+                                date = date.strftime('%Y%m%d')
+                                row[i] = float(date)
+                            except:
+                                date = dt.datetime.strptime(item, '%m/%d/%y')
+                                date = date.strftime('%Y%m%d')
+                                row[i] = float(date)
+                                
+                        elif i != 1: #skip column 1 with time
+                            row[i]=float(item)
+                        elif i == 1:
+                            row[i] = float(0)
+                    naData=np.array(row)
+                    for row in creader:
+                        for i, item in enumerate(row):
+                            if i==0:
+                                try:
+                                    date = dt.datetime.strptime(item, '%Y-%m-%d')
+                                    date = date.strftime('%Y%m%d')
+                                    row[i] = float(date)
+                                except:
+                                    date = dt.datetime.strptime(item, '%m/%d/%y')
+                                    date = date.strftime('%Y%m%d')
+                                    row[i] = float(date)
+                            elif i != 1: #skip column 1 with time
+                                row[i]=float(item)
+                            elif i == 1:
+                                row[i] = float(0)
+                        naData=np.vstack([np.array(row),naData])
                 else:
                     naData = pkl.load (_file)
                 _file.close()
@@ -345,6 +405,7 @@ class DataAccess(object):
                 for i in range (0, num_rows):
 
                     timebase = temp_np[i][0]
+                    #print type(timebase)
                     timeyear = int(timebase/10000)
                     
                     # Quick hack to skip most of the data

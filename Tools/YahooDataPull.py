@@ -1,5 +1,9 @@
 '''
-Pulling Yahoo CSV Data
+Short program to scrape historical price/volume data from Yahoo Fianance.
+into local CSV files that can be read and used by QSTK.  We gratefully 
+acknowledge Yahoo for making this data available.
+
+(c) 2012 by Lucena Research
 '''
 
 import urllib2

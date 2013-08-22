@@ -6,7 +6,7 @@ Created on Jun 1, 2010
 '''
 
 import sys
-import profile
+#import profile
 #sys.path.append(str(sys.path[0])+str("/../qstkutil/")) #So that it works without PYTHONPATH being set
 
 #for i in range (0, len(sys.path)):
