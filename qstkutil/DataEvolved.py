@@ -16,8 +16,10 @@ import time
 import pandas
 import pickle
 import sqlite3
+import numpy
 import datetime
 import MySQLdb
+import qsdateutil as du
 from operator import itemgetter
 from dateutil.relativedelta import relativedelta
 
@@ -169,20 +171,31 @@ class _MySQL(DriverInterface):
     """
 
     def __init__(self):
-        self._connect()
+        # Connection is now handled on a per-call basis
+        #self._connect()
+        pass
     
     def __del__(self):
-        self.db.close()
+        pass
             
     def _connect(self):
         s_filepath = os.path.dirname(os.path.abspath(__file__))
         # Read password from a file (does not support whitespace)
         s_pass = open(os.path.join(s_filepath,'pass.txt')).read().rstrip()
         
-
-        self.db = MySQLdb.connect("localhost", "finance", s_pass, "premiumdata")
+        try:
+            self.db = MySQLdb.connect("cordoba.lucenaresearch.com", "finance", s_pass, "premiumdata")
+        except:
+            s_filepath = os.path.dirname(os.path.abspath(__file__))
+            # Read password from a file (does not support whitespace)
+            s_pass = open(os.path.join(s_filepath,'pass2.txt')).read().rstrip()
+            self.db = MySQLdb.connect("cordoba.lucenaresearch.com", "finance", s_pass, "premiumdata")
 
         self.cursor = self.db.cursor()
+
+    def _disconnect(self):
+        self.cursor.close()
+        self.db.close()
 
     def get_data(self, ts_list, symbol_list, data_item,
                     verbose=False, include_delisted=False):
@@ -203,167 +216,447 @@ class _MySQL(DriverInterface):
         @note: If a symbol is not found all the values in the column for that stock will be NaN. Execution then
         continues as usual. No errors are raised at the moment.
         """
-        columns = []
-        results = []
 
-        # Check input data
-        assert isinstance(ts_list, list)
-        assert isinstance(symbol_list, list)
-        assert isinstance(data_item, list)
+        # Validate timestamps and symbol list
+        assert len(symbol_list) == len(set(symbol_list)), "Duplicate symbols"
+        assert len(ts_list) == len(set(ts_list)), "Duplicate timestamps"
 
-        # Map to new database schema to preserve legacy code
-        ds_map = {'open':'tropen',
-                  'high':'trhigh',
-                  'low':'trlow',
-                  'close':'trclose',
-                  'actual_close':'close',
-                  'volume':'volume',
-                  'adjusted_close':'adjclose'}
-        
-        for i in range(1, 101):
-            ds_map['f%i' % i] = 'f%i' % i
-        
-        for i in range(1, 10):
-            ds_map['c%i' % i] = 'c%i' % i
-
-        data_item = map(lambda(x): ds_map[x], data_item)
-
-
-        # Combine Symbols List for Query
-        symbol_query_list = ",".join(map(lambda x: "'" + x + "'", symbol_list))
-
-        # Combine Data Fields for Query
-        query_select_items = ",".join(data_item)
-        
-        # Now convert to ID's 
-        self.cursor.execute('''select assetid, code from asset 
-                               where code in( ''' + symbol_query_list + ''')''')
-        # Dictionary linking id's:symbols
-        d_id_sym = dict(self.cursor.fetchall())
-
-        ls_ids = d_id_sym.keys()
-        s_idlist = ",".join([str(x) for x in ls_ids])
-        
-        s_query = 'SELECT assetid, date, ' + query_select_items + \
-                  ' FROM priceadjusted WHERE assetid in (' + s_idlist + ')' + \
-                  ' AND date >= %s AND date <= %s '
-        
-        
-        self.cursor.execute(s_query, (ts_list[0].replace(hour=0), ts_list[-1]))
-
-        # Retrieve Results
-        results = self.cursor.fetchall()
-
-        # Create Data frames
-        for i in range(len(data_item)):
-            columns.append(pandas.DataFrame(index=ts_list, columns=symbol_list))
-
-        # Loop through rows
-        dt_time = datetime.time(hour=16)
-        for row in results:
-            #format of row is (sym, date, item1, item2, ...)
-            dt_date = datetime.datetime.combine(row[1], dt_time)
-            if dt_date not in columns[i].index:
-                continue
-            # Add all columns to respective data-frames
-            for i in range(len(data_item)):
-                columns[i][d_id_sym[row[0]]][dt_date] = row[i + 2]
-
-        return columns
-  
-
+        self._connect()
+        try:
+            columns_tech = []
+            columns_fund = []
+            results_tech = []
+            results_fund = []
+            columns_asset = []
+            results_asset = []
+            columns_dividend = []
+            results_dividend = []
+            columns_dilution = []
+            results_dilution = []
+            columns_insider = []
+            # Check input data
+            assert isinstance(ts_list, list)
+            assert isinstance(symbol_list, list)
+            assert isinstance(data_item, list)
+    
+            # Map to new database schema to preserve legacy code
+            ds_map = {'open':'tropen',
+                      'high':'trhigh',
+                      'low':'trlow',
+                      'close':'trclose',
+                      'actual_close':'close',
+                      'adjusted_close':'adjclose'}
+    
+            #keys for fundamental indicators
+            ls_fund_keys = ['sharesout',
+                            'latestavailableannual',
+                            'latestavailableinterim',
+                            'projfiscalyearend',
+                            'peproj',
+                            'pe',
+                            'eps',
+                            # 'dividend',
+                            # 'yield',
+                            'pegproj',
+                            'p2b',
+                            'p2s',
+                            'totd2eq',
+                            'ebitda',
+                            'grossmargin'
+                           ]
+    
+            #Keys to indicator from asset table
+            ls_asset_keys = ['icbcode', 'gicscode']
+    
+            #Keys to indicator from dividend table
+            ls_dividend_keys = ['divamt']
+    
+            #Keys to indicator from dilution table
+            ls_dilution_keys = ['dilfact']
+    
+            #Keys to indicator from insider table
+            ls_insider_keys = ['rating']
+    
+            data_item = data_item[:]
+            data_fund = []
+            li_fund_index = []
+            data_tech = []
+            li_tech_index = []
+            data_asset = []
+            li_asset_index = []
+            data_dividend = []
+            li_dividend_index = []
+            data_dilution = []
+            li_dilution_index = []
+            data_insider = []
+            li_insider_index = []
+            for i, item in enumerate(data_item):
+                if item in ls_fund_keys:
+                    data_fund.append(item)
+                    li_fund_index.append(i)
+                elif item in ls_asset_keys:
+                    data_asset.append(item)
+                    li_asset_index.append(i)
+                elif item in ls_dividend_keys:
+                    data_dividend.append(item)
+                    li_dividend_index.append(i)
+                elif item in ls_dilution_keys:
+                    data_dilution.append(item)
+                    li_dilution_index.append(i)
+                elif item in ls_insider_keys:
+                    data_insider.append(item)
+                    li_insider_index.append(i)
+                else:
+                    data_tech.append(item)
+                    li_tech_index.append(i)
+    
+            for i, item in enumerate(data_tech):
+                if item in ds_map.keys():
+                    data_tech[i] = ds_map[item]
+    
+            # Combine Symbols List for Query
+            symbol_query_list = ",".join(map(lambda x: "'" + x + "'", symbol_list))
+    
+            # Combine Data Fields for Query
+            query_select_tech_items = ",".join(data_tech)
+            query_select_fund_items = ",".join(data_fund)
+            query_select_asset_items = ",".join(data_asset)
+            query_select_dividend_items = ",".join(data_dividend)
+            query_select_dilution_items = ",".join(data_dilution)
+            query_select_insider_items = ",".join(data_insider)
+    
+            # Now convert to ID's 
+            self.cursor.execute('''select assetid, code from asset 
+                                   where code in( ''' + symbol_query_list + ''') AND recordstatus=1''')
+            # Dictionary linking id's:symbols
+            d_id_sym = dict(self.cursor.fetchall())
+    
+            ls_ids = d_id_sym.keys()
+            s_idlist = ",".join([str(x) for x in ls_ids])
+    
+            s_query_tech = 'SELECT assetid, date, ' + query_select_tech_items + \
+                           ' FROM priceadjusted WHERE assetid in (' + s_idlist + ')' + \
+                           ' AND date >= %s AND date <= %s '
+    
+            s_query_fund = 'SELECT assetid, date, ' + query_select_fund_items + \
+                           ' FROM fundamentals WHERE assetid in (' +s_idlist +')' + \
+                           ' AND date >= %s AND date <= %s '
+    
+            s_query_asset = 'SELECT assetid, ' + query_select_asset_items + \
+                           ' FROM asset WHERE assetid in (' +s_idlist +')'
+    
+            s_query_dividend = 'SELECT assetid, exdate, recordstatus, ' + query_select_dividend_items + \
+                           ' FROM dividend WHERE assetid in (' +s_idlist +')' + \
+                           ' AND exdate >= %s AND exdate <= %s AND recordstatus=1'
+    
+            s_query_dilution = 'SELECT assetid, exdate, recordstatus, diltypeid, ' + query_select_dilution_items + \
+                           ' FROM dilution WHERE assetid in (' +s_idlist +')' + \
+                           ' AND exdate >= %s AND exdate <= %s AND recordstatus=1 AND diltypeid in (1,3)'
+            
+            s_query_insider = 'SELECT assetid, date, ' + query_select_insider_items + \
+                           ' FROM insider_activity WHERE assetid in (' +s_idlist +')' + \
+                           ' AND date >= %s AND date <= %s '
+                           
+            if len(query_select_tech_items) !=0:
+                try:
+                    self.cursor.execute(s_query_tech, (ts_list[0].replace(hour=0), ts_list[-1]))
+                except:
+                    print 'Data error1, probably using an non-existent symbol'
+                
+                # Retrieve Results
+                results_tech = self.cursor.fetchall()
+                # Create Data frames
+                for i in range(len(data_tech)):
+                    columns_tech.append(pandas.DataFrame(index=ts_list, columns=symbol_list))
+    
+    
+                # Loop through rows
+                dt_time = datetime.time(hour=16)
+                for row in results_tech:
+                    #format of row is (sym, date, item1, item2, ...)
+                    dt_date = datetime.datetime.combine(row[1], dt_time)
+                    if dt_date not in columns_tech[i].index:
+                        continue
+                    # Add all columns to respective data-frames
+                    for i in range(len(data_tech)):
+                        columns_tech[i][d_id_sym[row[0]]][dt_date] = row[i+2]
+    
+            if len(query_select_asset_items)!=0:        
+                try:
+                    self.cursor.execute(s_query_asset)
+                except:
+                    print 'Data error2, probably using an non-existent symbol'
+    
+                # Retrieve Results
+                results_asset = self.cursor.fetchall()
+                # print results_asset
+                # Create Data frames
+                for i in range(len(data_asset)):
+                    columns_asset.append(pandas.DataFrame(index=ts_list, columns=symbol_list))
+    
+                # Loop through rows
+                for row in results_asset:
+                    #format of row is (sym, item1, item2, ...)
+                    # Add all columns to respective data-frames
+                    for i in range(len(data_asset)):
+                        if row[i+1] == None or row[i+1] == '':
+                            columns_asset[i][d_id_sym[row[0]]] = float('nan')
+                        else:
+                            columns_asset[i][d_id_sym[row[0]]] = float(row[i+1])
+    
+            if len(query_select_fund_items)!=0:        
+                try:
+                    self.cursor.execute(s_query_fund, (ts_list[0].replace(hour=0), ts_list[-1]))
+                except:
+                    print 'Data error3, probably using an non-existent symbol'
+                
+                # Retrieve Results
+                results_fund = self.cursor.fetchall()
+                #print results_fund[2]
+                # Create Data frames
+                for i in range(len(data_fund)):
+                    columns_fund.append(pandas.DataFrame(index=ts_list, columns=symbol_list))
+    
+                # Loop through rows
+                dt_time = datetime.time(hour=16)
+                for row in results_fund:
+                    #format of row is (sym, date, item1, item2, ...)
+                    dt_date = datetime.datetime.combine(row[1], dt_time)
+                    if dt_date not in columns_fund[i].index:
+                        continue
+                    # Add all columns to respective data-frames
+                    for i in range(len(data_fund)):
+                        #print type(row[i+2])
+                        #print (type(row[i+2]) == datetime.date)        
+                        if (type(row[i+2])!=datetime.date):
+                           columns_fund[i][d_id_sym[row[0]]][dt_date] = row[i+2]
+                        else:
+                           columns_fund[i][d_id_sym[row[0]]][dt_date] = int((row[
+                                  i+2]-datetime.date(1970,1,1)).total_seconds())
+    
+            if len(query_select_dividend_items)!=0:        
+                try:
+                    self.cursor.execute(s_query_dividend, (ts_list[0].replace(hour=0), ts_list[-1]))
+                except:
+                    print 'Data error4, probably using an non-existent symbol'
+    
+                # Retrieve Results
+                results_dividend = self.cursor.fetchall()
+                # print results_dividend
+                # Create Data frames
+                for i in range(len(data_dividend)):
+                    columns_dividend.append(pandas.DataFrame(index=ts_list, columns=symbol_list))
+    
+                # Loop through rows
+                dt_time = datetime.time(hour=16)
+                for row in results_dividend:
+                    #format of row is (sym, date, item1, item2, ...)
+                    dt_date = datetime.datetime.combine(row[1], dt_time)
+                    if dt_date not in columns_dividend[i].index:
+                        continue
+                    # Add all columns to respective data-frames
+                    for i in range(len(data_dividend)):
+                        if numpy.isnan(columns_dividend[i][d_id_sym[row[0]]][dt_date]):
+                            columns_dividend[i][d_id_sym[row[0]]][dt_date] = row[i+3]
+                        elif columns_dividend[i][d_id_sym[row[0]]][dt_date] != row[i+3]:
+                            columns_dividend[i][d_id_sym[row[0]]][dt_date] += row[i+3]
+    
+            if len(query_select_dilution_items)!=0:        
+                try:
+                    self.cursor.execute(s_query_dilution, (ts_list[0].replace(hour=0), ts_list[-1]))
+                except:
+                    print 'Data error5, probably using an non-existent symbol'
+    
+                # Retrieve Results
+                results_dilution = self.cursor.fetchall()
+                # print results_dilution
+                # Create Data frames
+                for i in range(len(data_dilution)):
+                    columns_dilution.append(pandas.DataFrame(index=ts_list, columns=symbol_list))
+    
+                # Loop through rows
+                dt_time = datetime.time(hour=16)
+                for row in results_dilution:
+                    #format of row is (sym, date, item1, item2, ...)
+                    dt_date = datetime.datetime.combine(row[1], dt_time)
+                    if dt_date not in columns_dilution[i].index:
+                        continue
+                    # Add all columns to respective data-frames
+                    for i in range(len(data_dilution)):
+                        if numpy.isnan(columns_dilution[i][d_id_sym[row[0]]][dt_date]):
+                            columns_dilution[i][d_id_sym[row[0]]][dt_date] = row[i+4]
+                        elif columns_dilution[i][d_id_sym[row[0]]][dt_date] != row[i+4]:
+                            columns_dilution[i][d_id_sym[row[0]]][dt_date] *= row[i+4]
+            
+            if len(query_select_insider_items) != 0:
+                try:
+                    self.cursor.execute(s_query_insider, (ts_list[0].replace(hour=0), ts_list[-1]))
+                except:
+                    print 'Data error6, probably using an non-existent symbol'
+    
+                # Retrieve Results
+                results_insider = self.cursor.fetchall()
+                # Create Data frames
+                for i in range(len(data_insider)):
+                    columns_insider.append(pandas.DataFrame(index=ts_list, 
+                                           columns=symbol_list).fillna(0))
+                    
+                # Loop through rows
+                dt_time = datetime.time(hour=16)
+                for row in results_insider:
+                    #format of row is (sym, date, item1, item2, ...)
+                    dt_date = datetime.datetime.combine(row[1], dt_time)
+                    if dt_date not in columns_insider[i].index:
+                        i_index = columns_insider[i].index.searchsorted(dt_date)
+                        if i_index == 0:
+                            continue
+                        i_index -= 1
+                        dt_new = columns_insider[i].index[i_index]
+                        dt_date = dt_new
+                    # Add all columns to respective data-frames
+                    for i in range(len(data_insider)):
+                        columns_insider[i][d_id_sym[row[0]]][dt_date] = row[i+2]
+    
+            columns = [numpy.NaN] * len(data_item)
+            for i, item in enumerate(li_tech_index):
+                columns[item] = columns_tech[i]
+            for i, item in enumerate(li_fund_index):
+                columns[item] = columns_fund[i]
+            for i, item in enumerate(li_asset_index):
+                columns[item] = columns_asset[i]
+            for i, item in enumerate(li_dividend_index):
+                columns[item] = columns_dividend[i]
+            for i, item in enumerate(li_dilution_index):
+                columns[item] = columns_dilution[i]
+            for i, item in enumerate(li_insider_index):
+                columns[item] = columns_insider[i]
+            return columns
+        finally:
+            self._disconnect()
+    
     def get_dividends(self, ts_list, symbol_list):
         """
         Read dividend data into a DataFrame from SQLite
         @param ts_list: List of timestamps for which the data values are needed. Timestamps must be sorted.
         @param symbol_list: The list of symbols for which the data values are needed
         """
-
-        # Combine Symbols List for Query
-        symbol_query_list = ",".join(map(lambda x: "'" + x + "'", symbol_list))
-
-        self.cursor.execute("""
-        select code, exdate, divamt
-        from dividend B, asset A where A.assetid = B.assetid and 
-        B.exdate >= %s and B.exdate <= %s and A.code in (
-        """ + symbol_query_list + """)""", (ts_list[0].replace(hour=0),
-                                             ts_list[-1],))
+        self._connect()
+        try:
+            # Combine Symbols List for Query
+            symbol_query_list = ",".join(map(lambda x: "'" + x + "'", symbol_list))
+    
+            self.cursor.execute("""
+            select code, exdate, divamt
+            from dividend B, asset A where A.assetid = B.assetid and 
+            B.exdate >= %s and B.exdate <= %s and A.code in (
+            """ + symbol_query_list + """)""", (ts_list[0].replace(hour=0),
+                                                 ts_list[-1],))
+    
+            # Retrieve Results
+            results = self.cursor.fetchall()
+    
+            # Remove all rows that were not asked for
+            results = list(results)
+    
+            if len(results) == 0:
+                return pandas.DataFrame(columns=symbol_list)
+    
+            # Create Pandas DataFrame in Expected Format
+            current_dict = {}
+            symbol_ranges = self._find_ranges_of_symbols(results)
+            for symbol, ranges in symbol_ranges.items():
+                current_symbol_data = results[ranges[0]:ranges[1] + 1]
+    
+                current_dict[symbol] = pandas.Series(map(itemgetter(2), 
+                                                    current_symbol_data),
+                     index=map(lambda x: itemgetter(1)(x) + relativedelta(hours=16), 
+                                                  current_symbol_data))
+    
+    
+            # Make DataFrame
+            ret = pandas.DataFrame(current_dict, columns=symbol_list)
+        finally:
+            self._disconnect()
         
-        # Retrieve Results
-        results = self.cursor.fetchall()
-
-        # Remove all rows that were not asked for
-        results = list(results)
-
-        if len(results) == 0:
-            return pandas.DataFrame(columns=symbol_list)
-  
-        # Create Pandas DataFrame in Expected Format
-        current_dict = {}
-        symbol_ranges = self._find_ranges_of_symbols(results)
-        for symbol, ranges in symbol_ranges.items():
-            current_symbol_data = results[ranges[0]:ranges[1] + 1]
-        
-            current_dict[symbol] = pandas.Series(map(itemgetter(2), 
-                                                current_symbol_data),
-                 index=map(lambda x: itemgetter(1)(x) + relativedelta(hours=16), 
-                                              current_symbol_data))
-
-                    
-        # Make DataFrame
-        ret = pandas.DataFrame(current_dict, columns=symbol_list)
         return ret.reindex(ts_list)
 
 
     def get_list(self, list_name):
+
+        self._connect()
+        try:
+            if type(list_name) == type('str') or \
+               type(list_name) == type(u'unicode'):
+                self.cursor.execute("""select symbol from premiumdata.lists
+                                       where name=%s;""", (list_name))
+            else:
+                self.cursor.execute("""select myself.code as symbol from 
+                    indexconstituent consititue1_, asset myself
+                    where myself.assetid = consititue1_.assetid and myself.recordstatus=1 and myself.statuscodeid < 100 and 
+                    consititue1_.indexassetid = %s;""", (str(int(list_name))))
+            lt_ret = self.cursor.fetchall()
+        finally:
+            self._disconnect()
         
-        if type(list_name) == type('str') or \
-           type(list_name) == type(u'unicode'):
-            self.cursor.execute("""select symbol from premiumdata.lists
-                                   where name=%s;""", (list_name))
-        else:
-            self.cursor.execute("""select myself.code as symbol from 
-                indexconstituent consititue1_, asset myself
-                where myself.assetid = consititue1_.assetid and myself.recordstatus=1 and myself.statuscodeid < 100 and 
-                consititue1_.indexassetid = %s;""", (str(int(list_name))))
+        return sorted([x[0] for x in lt_ret])
 
-        return sorted([x[0] for x in self.cursor.fetchall()])
-
-    def get_all_symbols(self):
+    def get_all_symbols(self, b_dead=False):
         ''' Returns all symbols '''
-        self.cursor.execute('''select distinct code from asset a where  
-                               a.statuscodeid<100 and a.recordstatus=1''')
-        return sorted([x[0] for x in self.cursor.fetchall()])
+        self._connect()
+        try:
+            if b_dead:
+                self.cursor.execute('''select distinct code from asset a where  
+                                       a.statuscodeid<=100 and a.recordstatus=1''')
+            else:
+                self.cursor.execute('''select distinct code from asset a where  
+                                       a.statuscodeid<100 and a.recordstatus=1''')
+            lt_ret = self.cursor.fetchall()
+        finally:
+            self._disconnect()
+        
+        return sorted([x[0] for x in lt_ret])
 
     def get_all_lists(self):
         
-
-        self.cursor.execute("""select asset0_.assetid as id, asset0_.issuername as name
-            from asset asset0_ where exists 
-            (select consititue1_.assetid from indexconstituent consititue1_ 
-            where asset0_.assetid=consititue1_.indexassetid) 
-            order by asset0_.issuername;""")
-        return sorted([x[1] for x in self.cursor.fetchall()])
+        self._connect()
+        try:
+            self.cursor.execute("""select asset0_.assetid as id, asset0_.issuername as name
+                from asset asset0_ where exists 
+                (select consititue1_.assetid from indexconstituent consititue1_ 
+                where asset0_.assetid=consititue1_.indexassetid) 
+                order by asset0_.issuername;""")
+            lt_ret = self.cursor.fetchall()
+        finally:
+            self._disconnect()
+        
+        return sorted([x[1] for x in lt_ret])
 
     def get_last_date(self):
         ''' Returns last day of valid data '''
-        self.cursor.execute( ''' select ts from premiumdata.price 
-                p,premiumdata.asset a, (select assetid as id,max(date)
-                as ts from premiumdata.price group by assetid) s
-                where p.assetid = a.assetid and s.id = p.assetid and 
-                p.date = s.ts and a.code='SPY';''')
-        dt_ret = datetime.datetime.combine(self.cursor.fetchall()[0][0],
-                                           datetime.time(16))
+        self._connect()
+        try:
+            self.cursor.execute( ''' select ts from premiumdata.price 
+                    p,premiumdata.asset a, (select assetid as id,max(date)
+                    as ts from premiumdata.price group by assetid) s
+                    where p.assetid = a.assetid and s.id = p.assetid and 
+                    p.date = s.ts and a.code='SPY';''')
+            dt_ret = datetime.datetime.combine(self.cursor.fetchall()[0][0],
+                                               datetime.time(16))
+        finally:
+            self._disconnect()
         return dt_ret
     
     def get_shares(self, symbol_list):
         ''' Returns list of values corresponding to shares outstanding '''
-        
-        symbol_query_list = ",".join(map(lambda x: "'" + x + "'", symbol_list))
-        self.cursor.execute( ''' SELECT code, sharesoutstanding FROM asset a
-                                 where code in (''' + symbol_query_list + ');' )
-
-        return dict(self.cursor.fetchall())
+        self._connect()
+        try:
+            symbol_query_list = ",".join(map(lambda x: "'" + x + "'", symbol_list))
+            self.cursor.execute( ''' SELECT code, sharesoutstanding FROM asset a
+                                     where code in (''' + symbol_query_list + ');' )
+            lt_ret = self.cursor.fetchall()
+        finally:
+            self._disconnect()
+        return dict(lt_ret)
         
          
     def _find_ranges_of_symbols(self, results):
@@ -502,18 +795,22 @@ class DataAccess(object):
 if __name__ == "__main__":
     db = DataAccess('mysql')
 
-    date1 = datetime.datetime(2012, 2, 27, 16)
-    date2 = datetime.datetime(2012, 2, 29, 16)
-    date3 = datetime.datetime(2012, 9, 29, 16)
+    date1 = datetime.datetime(2012, 11, 1, 16)
+    date2 = datetime.datetime(2012, 11, 2, 16)
+    date3 = datetime.datetime(2012, 11, 23, 16)
+    ts_list = du.getNYSEdays(date1,date3, datetime.timedelta(hours=16))
+    #print db.get_shares(['GOOG', 'AAPL'])
 
-    print db.get_shares(['GOOG', 'AAPL'])
-
-    print db.get_all_lists()
+    #print db.get_all_lists()
     #print db.get_all_symbols()
 
-    print db.get_list('Dow Jones Transportation')
-    
-    print db.get_dividends([date1 + datetime.timedelta(days=x) for x in range(100)],
-                            ["MSFT", "PGF", "GOOG", "A"])
+    #print db.get_list('Dow Jones Transportation')
 
-    print db.get_data([date1, date2], ["AAPL", "IBM", "GOOG", "A"], ["open", "close"])
+    #print db.get_dividends([date1 + datetime.timedelta(days=x) for x in range(100)],
+    #                        ["MSFT", "PGF", "GOOG", "A"])
+
+    ldf_data = db.get_data_hard_read(ts_list, ["MSFT", "AAPL"], 
+                                ["close","open","latestavailableannual","pe", "rating"])
+    print ldf_data[0]
+    print ldf_data[-2]
+    print ldf_data[-1]

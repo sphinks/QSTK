@@ -248,14 +248,14 @@ def featRSI( dData, lLookback=14,  b_human=False):
     # seperate data into positive and negative for easy calculations
     for sColumn in dfDeltaUp.columns:
         tsColDown = dfDeltaDown[sColumn]
-        tsColDown[tsColDown >= 0] = 0.0 
+        tsColDown[tsColDown >= 0] = 0 
         
         tsColUp = dfDeltaUp[sColumn]
-        tsColUp[tsColUp <= 0] = 0.0 
+        tsColUp[tsColUp <= 0] = 0
     
     # Note we take abs() of negative values, all should be positive now
-    dfRolUp = pand.rolling_mean(dfDeltaUp, lLookback)
-    dfRolDown = pand.rolling_mean(dfDeltaDown, lLookback).abs()
+    dfRolUp = pand.rolling_mean(dfDeltaUp, lLookback, min_periods=1)
+    dfRolDown = pand.rolling_mean(dfDeltaDown, lLookback, min_periods=1).abs()
     
     # relative strength
     dfRS = dfRolUp / dfRolDown
@@ -441,7 +441,7 @@ def featBeta( dData, lLookback=14, sMarket='$SPX', b_human=False ):
         return dData['close']
     return dfRet
 
-def featBollinger( dData, lLookback=20, teeth=0, b_human=False ):
+def featBollinger( dData, lLookback=20, b_human=False ):
     '''
     @summary: Calculate bollinger position as a function of std deviations.
     @param dData: Dictionary of data to use
@@ -467,8 +467,8 @@ def featBollinger( dData, lLookback=20, teeth=0, b_human=False ):
                         continue    
                     fAvg = np.average( tsPrice[ i-(lLookback-1):i+1 ] )
                     fStd = np.std( tsPrice[ i-(lLookback-1):i+1 ] )
-                    pstdRet[i] = fAvg+fStd
-                    nstdRet[i] = fAvg-fStd  
+                    pstdRet[i] = fAvg+2.0*fStd
+                    nstdRet[i] = fAvg-2.0*fStd  
                 data3[sym] = dfPrice[sym]
                 data3[sym + " Lower"] = nstdsRet[sym]
                 data3[sym + " Upper"] = pstdsRet[sym]
@@ -482,7 +482,7 @@ def featBollinger( dData, lLookback=20, teeth=0, b_human=False ):
         #''' Loop through stocks '''
         dfAvg = pand.rolling_mean(dfPrice, lLookback)
         dfStd = pand.rolling_std(dfPrice, lLookback)
-        return (dfPrice - dfAvg) / dfStd
+        return (dfPrice - dfAvg) / (2.0*dfStd)
 
 
 def featCorrelation( dData, lLookback=20, sRel='$SPX', b_human=False ):

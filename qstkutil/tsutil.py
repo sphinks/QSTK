@@ -18,6 +18,7 @@ import datetime as dt
 import numpy as np
 from qstkutil import qsdateutil
 from math import sqrt
+import pandas as pd
 from copy import deepcopy
 
 
@@ -33,6 +34,9 @@ def daily(lfFunds):
     @param funds: A time series containing daily fund values
     @return an array of daily returns
     """
+    if type(lfFunds) == type(pd.Series()):
+        ldt_timestamps = du.getNYSEdays(lfFunds.index[0], lfFunds.index[-1], dt.timedelta(hours=16))
+        lfFunds = lfFunds.reindex(index=ldt_timestamps, method='ffill')
     nds = np.asarray(deepcopy(lfFunds))
     s= np.shape(nds)
     if len(s)==1:
@@ -131,7 +135,7 @@ def returnize0(nds):
     s= np.shape(nds)
     if len(s)==1:
         nds=np.expand_dims(nds,1)
-    nds[1:, :] = (nds[1:, :] / nds[0:-1]) - 1
+    nds[1:, :] = (nds[1:, :] - nds[0:-1]) / abs(nds[0:-1])
     nds[0, :] = np.zeros(nds.shape[1])
 
 def returnize1(nds):
@@ -146,7 +150,7 @@ def returnize1(nds):
         nds=np.expand_dims(nds,1)
     nds[1:, :] = (nds[1:, :]/nds[0:-1])
     nds[0, :] = np.ones(nds.shape[1])
-    
+
 def priceize1(nds):
     """
     @summary Computes stepwise (usually daily) returns relative to 1, where
@@ -661,7 +665,22 @@ def optimizePortfolio(df_rets, list_min, list_max, list_price_target,
         allocations = _create_dict(df_rets, naPortWeights)
         return {'allocations': allocations, 'std_dev': min(lfStd), 'expected_return': f_return, 'error': False}
 
-    # Otherwise try to hit custom target between 0-1 min-max risk
+    # If target_risk = 0.5, then return the one with maximum sharpe
+    if target_risk == 0.5:
+        lf_return_new = np.array(lfReturn)
+        lf_std_new = np.array(lfStd)
+        lf_std_new = lf_std_new[lf_return_new >= f_return]
+        lf_return_new = lf_return_new[lf_return_new >= f_return]
+        na_sharpe = lf_return_new / lf_std_new
+
+        i_index_max_sharpe, = np.where(na_sharpe == max(na_sharpe))
+        i_index_max_sharpe = i_index_max_sharpe[0]
+        fTarget = lf_return_new[i_index_max_sharpe]
+        (naPortWeights, fPortDev, b_error) = OptPort(df_rets.values, fTarget, naLower, naUpper, naExpected, direction)
+        allocations = _create_dict(df_rets, naPortWeights)
+        return {'allocations': allocations, 'std_dev': fPortDev, 'expected_return': fTarget, 'error': b_error}
+
+    # Otherwise try to hit custom target between 0-1 min-max return
     fTarget = f_return + ((fMax - f_return) * target_risk)
 
     (naPortWeights, fPortDev, b_error) = OptPort( df_rets.values, fTarget, naLower, naUpper, naExpected, direction)

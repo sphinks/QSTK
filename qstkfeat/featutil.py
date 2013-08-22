@@ -14,6 +14,7 @@ Created on Nov 7, 2011
 ''' Python imports '''
 import math
 import pickle
+import inspect
 import datetime as dt
 from dateutil.relativedelta import relativedelta
 
@@ -21,9 +22,11 @@ from dateutil.relativedelta import relativedelta
 import numpy as np
 import matplotlib.pyplot as plt
 
+
 ''' Our Imports '''
 import qstklearn.kdtknn as kdt
 from qstkutil import DataAccess as da
+from qstkutil import DataEvolved as de
 from qstkutil import qsdateutil as du
 from qstkutil import tsutil as tsu
 
@@ -40,38 +43,43 @@ def getMarketRel( dData, sRel='$SPX' ):
     @return: Dictionary of market relative values
     '''
     
+    # the close dataframe is assumed to be in the dictionary data
+    # otherwise the function will NOT WORK!
     if sRel not in dData['close'].columns:
         raise KeyError( 'Market relative stock %s not found in getMR()'%sRel )
     
     
     dRet = {}
-       
-    ''' Make all data market relative, except for volume '''
+
+    dfClose = dData['close'].copy()
+    
+    dfCloseMark = dfClose.copy()
+    tsu.returnize0(  dfCloseMark.values )
+    dfCloseMark = (dfCloseMark - dfCloseMark[sRel]) + 1.
+    dfCloseMark.ix[0, :] = 100.
+    dfCloseMark = dfCloseMark.cumprod(axis=0)
+    
+    #print dfCloseMark
+    #Make all data market relative, except for volume
     for sKey in dData.keys():
         
-        ''' Don't calculate market relative volume, but still copy it over '''
+        # Don't calculate market relative volume, but still copy it over 
         if sKey == 'volume':
             dRet['volume'] = dData['volume']
             continue
-        
-        dfMarkRel = dData[sKey].copy()
-        
-        #Get returns
-        tsu.returnize0(  dfMarkRel.values )
-        
-        # Subtract market returns and make them 1-based, stocks start at 100
-        dfMarkRel = (dfMarkRel - dfMarkRel[sRel]) + 1.
-        dfMarkRel.ix[0, :] = 100.
-        
-        dfMarkRel = dfMarkRel.cumprod(axis=0)
 
-        ''' Do not change market stock '''
-        dfMarkRel[sRel] = dData[sKey][sRel]
-        
-        ''' Add dataFrame to dictionary to return, move to next key '''
-        dRet[sKey] = dfMarkRel
+        dfKey = dData[sKey]
+        dfRatio = dfKey/dfClose
         
         
+        #Add dataFrame to dictionary to return, move to next key 
+        dRet[sKey] = dfCloseMark * dfRatio
+        
+        #Comment the line below to convert the sRel as well, uncomment it
+        #to keep the relative symbol's raw data
+        dRet[sKey][sRel] = dData[sKey][sRel]
+
+    #print dRet 
     return dRet
 
 
@@ -117,16 +125,52 @@ def applyFeatures( dData, lfcFeatures, ldArgs, sMarketRel=None, sLog=None, bMin=
                 # bMin means only calculate the LAST row of the stock
                 dTmp = {}
                 for sKey in dDataRelative:
-                    dTmp[sKey] = dDataRelative[sKey].ix[ -ldArgs[i]['lLookback']:]
+                    if 'i_bars' in ldArgs[i]:
+                        dTmp[sKey] = dDataRelative[sKey].ix[ 
+                                     -(ldArgs[i]['lLookback'] + 
+                                     ldArgs[i]['i_bars']+1):]
+                    else:  
+                        if 'lLookback' not in ldArgs[i]:
+                            d_defaults = inspect.getargspec(fcFeature).defaults
+                            d_args = inspect.getargspec(fcFeature).args
+                            i_diff = len(d_args) - len(d_defaults)
+                            i_index = d_args.index('lLookback') - i_diff
+                            i_cut = -(d_defaults[i_index]+1)
+                            dTmp[sKey] = dDataRelative[sKey].ix[i_cut:]
+                            #print fcFeature.__name__ + ":" + str(i_cut)
+                            
+                        else:   
+                            dTmp[sKey] = dDataRelative[sKey].ix[ 
+                                         -(ldArgs[i]['lLookback'] + 1):]  
                 ldfRet.append( fcFeature( dTmp, **ldArgs[i] ).ix[-1:] )
             else:
                 ldfRet.append( fcFeature( dDataRelative, **ldArgs[i] ) )
+        
+
+                
         else:
             if bMin:
                 # bMin means only calculate the LAST row of the stock
                 dTmp = {}
                 for sKey in dData:
-                    dTmp[sKey] = dData[sKey].ix[ -ldArgs[i]['lLookback']:]
+                    if 'i_bars' in ldArgs[i]:
+                        dTmp[sKey] = dData[sKey].ix[ 
+                                     -(ldArgs[i]['lLookback'] + 
+                                     ldArgs[i]['i_bars']+1):]
+                       
+                    else:    
+                        if 'lLookback' not in ldArgs[i]:
+                            d_defaults = inspect.getargspec(fcFeature).defaults
+                            d_args = inspect.getargspec(fcFeature).args
+                            i_diff = len(d_args) - len(d_defaults)
+                            i_index = d_args.index('lLookback') - i_diff
+                            i_cut = -(d_defaults[i_index]+1)
+                            dTmp[sKey] = dData[sKey].ix[i_cut:]
+                            #print fcFeature.__name__ + ":" + str(i_cut)
+                        else:   
+                            dTmp[sKey] = dData[sKey].ix[ 
+                                     -(ldArgs[i]['lLookback'] + 1):]
+                   
                 ldfRet.append( fcFeature( dTmp, **ldArgs[i] ).ix[-1:] )
             else:
                 ldfRet.append( fcFeature( dData, **ldArgs[i] ) )
@@ -250,8 +294,14 @@ def normFeatures( naFeatures, fMin, fMax, bAbsolute, bIgnoreLast=True ):
             
         ''' Calculate multiplier and shift variable so that new data fits in specified range '''
         fRange = fFeatMax - fFeatMin
-        fMult = fNewRange / fRange
-        fShift = fMin - (fFeatMin * fMult)
+        
+        if fRange == 0:
+            print 'Warning, bad query data range'
+            fMult = 1.
+            fShigt = 0.
+        else:
+            fMult = fNewRange / fRange
+            fShift = fMin - (fFeatMin * fMult)
         
         ''' scale and shift, save in return array '''
         naFeatures[:,i] *= fMult
@@ -365,11 +415,11 @@ def testFeature( fcFeature, dArgs ):
     '''
     
     ''' Get Train data for 2009-2010 '''
-    dtStart = dt.datetime(2009, 1, 1)
-    dtEnd = dt.datetime(2009, 5, 1)
+    dtStart = dt.datetime(2011, 7, 1)
+    dtEnd = dt.datetime(2011, 12, 31)
          
     ''' Pull in current training data and test data '''
-    norObj = da.DataAccess('Norgate')
+    norObj = de.DataAccess('mysql')
     ''' Get 2 extra months for moving averages and future returns '''
     ldtTimestamps = du.getNYSEdays( dtStart, dtEnd, dt.timedelta(hours=16) )
     
@@ -379,7 +429,7 @@ def testFeature( fcFeature, dArgs ):
     lsSym.append('$VIX')
     lsSym.sort()
     
-    lsKeys = ['open', 'high', 'low', 'close', 'volume']
+    lsKeys = ['open', 'high', 'low', 'close', 'volume', 'actual_close']
     ldfData = norObj.get_data( ldtTimestamps, lsSym, lsKeys )
     dData = dict(zip(lsKeys, ldfData))
     dfPrice = dData['close']
@@ -409,6 +459,52 @@ def testFeature( fcFeature, dArgs ):
         plt.title( '%s-%s'%(fcFeature.__name__, str(dArgs)) )
         plt.show()
 
+
+    
+    
+def speedTest(lfcFeature,ldArgs):
+    '''
+    @Author: Tingyu Zhu
+    @summary: Function to test the runtime for a list of features, and output them by speed
+    @param lfcFeature: a list of features that will be sorted by runtime
+    @param dArgs: Arguments to pass into feature function
+    @return: A list of sorted tuples of format (time, function name/param string)
+    ''' 	
+
+    '''pulling out 2 years data to run test'''
+    daData = de.DataAccess('mysql')
+    dtStart = dt.datetime(2010, 1, 1)
+    dtEnd = dt.datetime(2011, 12, 31)
+    dtTimeofday = dt.timedelta(hours=16)
+    lsSym = ['AAPL', 'GOOG', 'XOM', 'AMZN', 'BA', 'GILD', '$SPX']
+
+    #print lsSym
+
+    '''set up variables for applyFeatures'''
+    lsKeys = ['open', 'high', 'low', 'close', 'volume', 'actual_close']
+    ldtTimestamps = du.getNYSEdays( dtStart, dtEnd, dtTimeofday)
+    ldfData = daData.get_data( ldtTimestamps, lsSym, lsKeys)
+    dData = dict(zip(lsKeys, ldfData))
+    
+    '''loop through features'''
+    ltResults = []
+    for i in range(len(lfcFeature)):
+        dtFuncStart = dt.datetime.now()
+        ldfFeatures = applyFeatures( dData, [lfcFeature[i]], [ldArgs[i]], 
+                                     sMarketRel='$SPX')
+        ltResults.append((dt.datetime.now() - dtFuncStart, 
+                         lfcFeature[i].__name__ + ' : ' + str(ldArgs[i])))
+    ltResults.sort()
+    
+    '''print out result'''
+    for tResult in ltResults:
+        print tResult[1], ':', tResult[0]
+    
+    return ltResults
+
 if __name__ == '__main__':
-    testFeature( class_fut_ret, {'MR':True})
-    pass
+   
+   speedTest([featMA, featRSI, featAroon, featBeta, featCorrelation, 
+              featBollinger, featStochastic], [{'lLookback':30}] * 7) 
+   #testFeature( class_fut_ret, {'MR':True})
+   pass
